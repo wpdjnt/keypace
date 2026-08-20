@@ -1,0 +1,205 @@
+#include "data.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
+
+struct settings {
+  struct termios orig_state;
+  int rows, cols;
+  int word_sizes[10];
+  int line_coords[10][2];
+  char *words[100];
+};
+
+struct settings s;
+
+void get_window_size(int *width, int *height)
+{
+  struct winsize ws;
+
+  ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
+
+  *width = ws.ws_col;
+  *height = ws.ws_row;
+}
+
+void exit_raw_mode(void)
+{
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &s.orig_state);
+
+  write(STDOUT_FILENO, "\033[?1049l", 8);
+}
+
+void enter_raw_mode(void)
+{
+  atexit(exit_raw_mode);
+  tcgetattr(STDIN_FILENO, &s.orig_state);
+
+  struct termios raw = s.orig_state;
+
+  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  raw.c_oflag &= ~(OPOST);
+  raw.c_cflag |= (CS8);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+  raw.c_cc[VMIN] = 0;
+  raw.c_cc[VTIME] = 1;
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+
+  get_window_size(&s.cols, &s.rows);
+
+  write(STDOUT_FILENO, "\033[?1049h", 8);
+}
+
+void draw_text(void)
+{
+  char buf[s.cols * s.rows];
+  int i = 0;
+  int x, y = 1;
+  for (; i < (s.rows - 10) / 2;) {
+    buf[i++] = '\n';
+    ++y;
+  }
+
+  for (int a = 0; a < 10; ++a) {
+    x = 1;
+    char mini_buf[s.cols];
+    int j = 0;
+    for (int b = 0; b < 10; ++b) {
+      const char *str = text_data[rand() % WORDS_ARRAY_SIZE];
+      s.words[a * 10 + b] = (char *)str;
+      int str_size = strlen(str);
+      s.word_sizes[b] = str_size;
+      memcpy(mini_buf + j, str, str_size);
+      j += str_size;
+      mini_buf[j++] = (b != 9) ? ' ' : '\n';
+    }
+    buf[i++] = '\r';
+    for (int u = 0; u < (s.cols - j) / 2; ++u) {
+      buf[i++] = ' ';
+      ++x;
+    }
+    s.line_coords[a][0] = x;
+    s.line_coords[a][1] = y;
+    memcpy(buf + i, mini_buf, j);
+    i += j;
+    y += 1;
+  }
+  char cursor_buf[32];
+  sprintf(cursor_buf, "\x1b[%d;%dH", s.line_coords[0][1], s.line_coords[0][0]);
+  write(STDOUT_FILENO, buf, i);
+  write(STDOUT_FILENO, cursor_buf, strlen(cursor_buf));
+}
+
+char read_char(void)
+{
+  char c;
+  while (read(STDIN_FILENO, &c, 1) <= 0)
+    ;
+  return c;
+}
+
+void display_specs(int time, float accuracy)
+{
+  if (time <= 0.0f)
+    return;
+
+  char buf[512];
+  int i = 0;
+  for (; i < (s.rows - 2) / 2;)
+    buf[i++] = '\n';
+  char line1[32], line2[32];
+  sprintf(line1, "Words per minute: %d\n\r",
+          (int)(100.0 / ((float)time / 60.0)));
+  sprintf(line2, "Accuracy: %.2f%%", accuracy * 100);
+  for (int j = 0; j < (s.cols - (int)strlen(line1)) / 2; ++j)
+    buf[i++] = ' ';
+  memcpy(buf + i, line1, strlen(line1));
+  i += strlen(line1);
+  for (int j = 0; j < (s.cols - (int)strlen(line2)) / 2; ++j)
+    buf[i++] = ' ';
+  memcpy(buf + i, line2, strlen(line2));
+  i += strlen(line2);
+  write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
+  write(STDOUT_FILENO, buf, i);
+
+  char c;
+  do {
+    c = read_char();
+  } while (!(c == '\x11' || c == '\r'));
+}
+
+float loop(void)
+{
+  int line = 0, word = 0, ch = 0;
+  float chars = 0, chars_typed = 0;
+  while (1) {
+    char c = read_char();
+    if (c == '\x11')
+      return 0.0f;
+    if (c == ' ') {
+      if (*(s.words[line * 10 + word] + ch) == '\0') {
+        if (word < 9) {
+          ++word;
+          ch = 0;
+          write(STDOUT_FILENO, "\x1b[C", 4);
+        }
+      } else {
+        char buf[16];
+        sprintf(buf, "\x1b[1;91m%c\x1b[0m", *(s.words[line * 10 + word] + ch));
+        write(STDOUT_FILENO, buf, strlen(buf));
+        ++ch;
+        ++chars;
+      }
+    } else if (c == '\r') {
+      if (*(s.words[line * 10 + word] + ch) == '\0') {
+        if (word == 9) {
+          if (line == 9)
+            return chars_typed / chars;
+          ++line;
+          word = 0;
+          ch = 0;
+          char buf[16];
+          sprintf(buf, "\x1b[%d;%dH", s.line_coords[line][1],
+                  s.line_coords[line][0]);
+          write(STDOUT_FILENO, buf, strlen(buf));
+        }
+      } else {
+        char buf[16];
+        sprintf(buf, "\x1b[1;91m%c\x1b[0m", *(s.words[line * 10 + word] + ch));
+        write(STDOUT_FILENO, buf, strlen(buf));
+        ++ch;
+        ++chars;
+      }
+    } else if (c == *(s.words[line * 10 + word] + ch)) {
+      char buf[16];
+      sprintf(buf, "\x1b[1;92m%c\x1b[0m", c);
+      write(STDOUT_FILENO, buf, strlen(buf));
+      ++ch;
+      ++chars;
+      ++chars_typed;
+    } else if (*(s.words[line * 10 + word] + ch) != '\0') {
+      char buf[16];
+      sprintf(buf, "\x1b[1;91m%c\x1b[0m", *(s.words[line * 10 + word] + ch));
+      write(STDOUT_FILENO, buf, strlen(buf));
+      ++ch;
+      ++chars;
+    }
+  }
+}
+
+int main(void)
+{
+  srand(time(NULL));
+  enter_raw_mode();
+  draw_text();
+  time_t time1 = time(NULL);
+  float accuracy = loop();
+  time_t time2 = time(NULL);
+  display_specs((int)(time2 - time1), accuracy);
+  return 0;
+}

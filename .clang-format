@@ -1,0 +1,8 @@
+BasedOnStyle: LLVM
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterControlStatement: Never
+  AfterFunction: true
+IndentWidth: 2
+TabWidth: 2
+UseTab: Never
