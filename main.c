@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "data.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,15 +8,16 @@
 #include <time.h>
 #include <unistd.h>
 
-struct settings {
+struct state {
   struct termios orig_state;
   int rows, cols;
   int word_sizes[10];
   int line_coords[10][2];
   char *words[100];
+  int completed_words;
 };
 
-struct settings s;
+struct state s;
 
 void get_window_size(int *width, int *height)
 {
@@ -103,6 +105,14 @@ char read_char(void)
   return c;
 }
 
+void display_help(void)
+{
+  char *message = "Keypace help:\n"
+                  "-h to show help message";
+  puts(message);
+  exit(0);
+}
+
 void display_specs(int time, float accuracy)
 {
   if (time <= 0.0f)
@@ -112,14 +122,19 @@ void display_specs(int time, float accuracy)
   int i = 0;
   for (; i < (s.rows - 2) / 2;)
     buf[i++] = '\n';
-  char line1[32], line2[32];
+  char line1[32], line2[32], line3[32];
   sprintf(line1, "Words per minute: %d\n\r",
-          (int)(100.0 / ((float)time / 60.0)));
+          (int)((float)s.completed_words / ((float)time / 60.0)));
+  sprintf(line3, "Words typed: %d\n\r", s.completed_words);
   sprintf(line2, "Accuracy: %.2f%%", accuracy * 100);
   for (int j = 0; j < (s.cols - (int)strlen(line1)) / 2; ++j)
     buf[i++] = ' ';
   memcpy(buf + i, line1, strlen(line1));
   i += strlen(line1);
+  for (int j = 0; j < (s.cols - (int)strlen(line3)) / 2; ++j)
+    buf[i++] = ' ';
+  memcpy(buf + i, line3, strlen(line3));
+  i += strlen(line3);
   for (int j = 0; j < (s.cols - (int)strlen(line2)) / 2; ++j)
     buf[i++] = ' ';
   memcpy(buf + i, line2, strlen(line2));
@@ -137,23 +152,19 @@ float loop(void)
 {
   int line = 0, word = 0, ch = 0;
   float chars = 0, chars_typed = 0;
+  s.completed_words = 0;
   while (1) {
     char c = read_char();
     if (c == '\x11')
-      return 0.0f;
+      return (chars == 0) ? 0.0f : chars_typed / chars;
     if (c == ' ') {
       if (*(s.words[line * 10 + word] + ch) == '\0') {
         if (word < 9) {
           ++word;
+          ++s.completed_words;
           ch = 0;
           write(STDOUT_FILENO, "\x1b[C", 4);
         }
-      } else {
-        char buf[16];
-        sprintf(buf, "\x1b[1;91m%c\x1b[0m", *(s.words[line * 10 + word] + ch));
-        write(STDOUT_FILENO, buf, strlen(buf));
-        ++ch;
-        ++chars;
       }
     } else if (c == '\r') {
       if (*(s.words[line * 10 + word] + ch) == '\0') {
@@ -161,6 +172,7 @@ float loop(void)
           if (line == 9)
             return chars_typed / chars;
           ++line;
+          ++s.completed_words;
           word = 0;
           ch = 0;
           char buf[16];
@@ -192,8 +204,15 @@ float loop(void)
   }
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
+  switch (getopt(argc, argv, "h")) {
+  case 'h':
+    display_help();
+    break;
+  default:
+    break;
+  }
   srand(time(NULL));
   enter_raw_mode();
   draw_text();
