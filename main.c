@@ -8,6 +8,8 @@
 #include <time.h>
 #include <unistd.h>
 
+enum mode { TIME_MODE, WORD_MODE, INFINITE_MODE };
+
 struct state {
   struct termios orig_state;
   int rows, cols;
@@ -15,9 +17,14 @@ struct state {
   int line_coords[10][2];
   char *words[100];
   int completed_words;
+  enum mode mode;
+  int mode_value;
+  time_t time_start;
 };
 
 struct state s;
+
+int max(int a, int b) { return (a > b) ? a : b; }
 
 void get_window_size(int *width, int *height)
 {
@@ -107,8 +114,24 @@ char read_char(void)
 
 void display_help(void)
 {
-  char *message = "Keypace help:\n"
-                  "-h to show help message";
+  char *message = "Keypace usage:\n"
+                  " -h show help message\n"
+                  " -t time mode\n"
+                  " -w word mode\n"
+                  " -i infinite mode\n\n"
+                  "Mode describtion:\n"
+                  " time mode:\n"
+                  "  ends after a certain amount of time has pased\n"
+                  "  -t flag accepts a time value, specified in seconds\n"
+                  "  if specified value is less than 10 seconds, then it will "
+                  "be defaulted to 10\n"
+                  " word mode:\n"
+                  "  ends after a certain amount of words has been typed\n"
+                  "  -w flag accepts a number of words needed to be typed\n"
+                  "  if specified value is less than 10 words, then it will be "
+                  "defaulted to 10\n"
+                  " infinite mode:\n"
+                  "  runs indefinitely, press Ctrl+q to terminate";
   puts(message);
   exit(0);
 }
@@ -154,6 +177,19 @@ float loop(void)
   float chars = 0, chars_typed = 0;
   s.completed_words = 0;
   while (1) {
+    switch (s.mode) {
+    case TIME_MODE:
+      if (time(NULL) - s.time_start >= s.mode_value)
+        return chars_typed / chars;
+      break;
+    case WORD_MODE:
+      if (s.completed_words >= s.mode_value)
+        return chars_typed / chars;
+      break;
+    case INFINITE_MODE:
+      // infinite mode, it doesnt end so no return
+      break;
+    }
     char c = read_char();
     if (c == '\x11')
       return (chars == 0) ? 0.0f : chars_typed / chars;
@@ -169,8 +205,15 @@ float loop(void)
     } else if (c == '\r') {
       if (*(s.words[line * 10 + word] + ch) == '\0') {
         if (word == 9) {
-          if (line == 9)
-            return chars_typed / chars;
+          if (line == 9) {
+            ++s.completed_words;
+            line = 0;
+            word = 0;
+            ch = 0;
+            write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
+            draw_text();
+            continue;
+          }
           ++line;
           ++s.completed_words;
           word = 0;
@@ -206,19 +249,36 @@ float loop(void)
 
 int main(int argc, char *argv[])
 {
-  switch (getopt(argc, argv, "h")) {
+  switch (getopt(argc, argv, "hit:w:")) {
   case 'h':
     display_help();
     break;
+  case 't':
+    s.mode = TIME_MODE;
+    s.mode_value = max(atoi(optarg), 10);
+    break;
+  case 'w':
+    s.mode = WORD_MODE;
+    s.mode_value = max(atoi(optarg), 10);
+    break;
+  case 'i':
+    s.mode = INFINITE_MODE;
+    break;
+  case '?':
+    puts("Unknown option or missing argument, see -h for help");
+    return 0;
   default:
+    s.mode = TIME_MODE;
+    s.mode_value = 30;
     break;
   }
+
   srand(time(NULL));
   enter_raw_mode();
   draw_text();
-  time_t time1 = time(NULL);
+  s.time_start = time(NULL);
   float accuracy = loop();
   time_t time2 = time(NULL);
-  display_specs((int)(time2 - time1), accuracy);
+  display_specs((int)(time2 - s.time_start), accuracy);
   return 0;
 }
