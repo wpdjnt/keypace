@@ -6,7 +6,6 @@ Minimalistic CLI tool for testing and improving your typing speed
 
 on Linux/MacOS run
 
-````
 ```bash
 # clone the repository
 git clone https://github.com/wpdjnt/Keypace
@@ -16,4 +15,3 @@ cd keypace
 chmod +x install.sh
 ./install.sh
 ```
-
