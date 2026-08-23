@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "data.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,22 +9,23 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "1.1.0"
+#define VERSION "1.1.1"
 
 enum mode { TIME_MODE, WORD_MODE, INFINITE_MODE };
 
 struct state {
   struct termios orig_state;
+  enum mode mode;
+  char *words[100];
+  int chars, chars_typed;
+  int completed_words;
+  int cursor_pos[2];
+  int line_coords[10][2];
+  int mode_value;
   int rows, cols;
   int word_sizes[10];
-  int line_coords[10][2];
-  char *words[100];
-  int completed_words;
-  enum mode mode;
-  int mode_value;
-  time_t time_start;
-  int chars, chars_typed;
   int wrong_words;
+  time_t time_start;
 };
 
 struct state s;
@@ -102,6 +104,8 @@ void draw_text(void)
     i += j;
     y += 1;
   }
+  s.cursor_pos[0] = s.line_coords[0][0];
+  s.cursor_pos[1] = s.line_coords[0][1];
   char cursor_buf[32];
   sprintf(cursor_buf, "\x1b[%d;%dH", s.line_coords[0][1], s.line_coords[0][0]);
   write(STDOUT_FILENO, buf, i);
@@ -120,7 +124,7 @@ void display_help(void)
 {
   char *message = "Keypace usage:\n"
                   " -h show help message\n"
-		  " -v show version\n"
+                  " -v show version\n"
                   " -t time mode\n"
                   " -w word mode\n"
                   " -i infinite mode\n\n"
@@ -147,9 +151,11 @@ void display_version(void)
   exit(0);
 }
 
-void display_specs(int time, float accuracy)
+void display_specs(void)
 {
-  if (time <= 0.0f)
+  int t = (int)(time(NULL) - s.time_start);
+  float accuracy = (s.chars == 0) ? 0.0f : (float)s.chars_typed / s.chars;
+  if (t == 0)
     return;
 
   char buf[512];
@@ -157,10 +163,10 @@ void display_specs(int time, float accuracy)
   for (; i < (s.rows - 2) / 2;)
     buf[i++] = '\n';
   char line1[32], line2[32], line3[32], line4[32];
-  int wpm_raw = (int)(((float)s.chars / 5) / ((float)time / 60.0));
+  int wpm_raw = (int)(((float)s.chars / 5) / ((float)t / 60.0));
   sprintf(line1, "Raw WPM: %d\n\r", wpm_raw);
   sprintf(line4, "Net WPM: %d\n\r",
-          wpm_raw - (int)(s.wrong_words / ((float)time / 60)));
+          wpm_raw - (int)(s.wrong_words / ((float)t / 60)));
   sprintf(line3, "Words typed: %d\n\r", s.completed_words);
   sprintf(line2, "Accuracy: %.2f%%", accuracy * 100);
   for (int j = 0; j < (s.cols - (int)strlen(line1)) / 2; ++j)
@@ -188,94 +194,200 @@ void display_specs(int time, float accuracy)
   } while (!(c == '\x11' || c == '\r'));
 }
 
-float loop(void)
+void time_mode_info(void)
 {
-  int line = 0, word = 0, ch = 0;
-  s.chars = 0;
-  s.chars_typed = 0;
-  s.completed_words = 0;
-  s.wrong_words = 0;
-  int mistakes_in_word = 0; // for tracking if word already had mistakes
+  if (s.line_coords[0][1] <= 2)
+    return;
+  char minibuf[32];
+  int l;
+  l = snprintf(minibuf, sizeof(minibuf), "\x1b[1mTime left: %ds\x1b[0m",
+               (s.time_start == 0)
+                   ? s.mode_value
+                   : s.mode_value - (int)(time(NULL) - s.time_start));
+  minibuf[l] = '\0';
+  l -= 8;
+  char buf[64];
+  l = snprintf(buf, sizeof(buf), "\x1b[%d;%dH\x1b[2K%s\x1b[%d;%dH",
+               s.line_coords[0][1] - 2, (s.cols - l) / 2, minibuf,
+               s.cursor_pos[1], s.cursor_pos[0]);
+  write(STDOUT_FILENO, buf, l);
+}
 
-  while (1) {
-    switch (s.mode) {
-    case TIME_MODE:
-      if (time(NULL) - s.time_start >= s.mode_value)
-        return (float)s.chars_typed / s.chars;
-      break;
-    case WORD_MODE:
-      if (s.completed_words >= s.mode_value)
-        return (float)s.chars_typed / s.chars;
-      break;
-    case INFINITE_MODE:
-      // infinite mode, it doesnt end so no return
-      break;
+void word_mode_info(void)
+{
+  if (s.line_coords[0][1] <= 2)
+    return;
+  char minibuf[32];
+  int l;
+  l = snprintf(minibuf, sizeof(minibuf), "\x1b[1mWords to type: %d\x1b[0m",
+               s.mode_value - s.completed_words);
+  minibuf[l] = '\0';
+  l -= 8;
+  char buf[64];
+  l = snprintf(buf, sizeof(buf), "\x1b[%d;%dH\x1b[2K%s\x1b[%d;%dH",
+               s.line_coords[0][1] - 2, (s.cols - l) / 2, minibuf,
+               s.cursor_pos[1], s.cursor_pos[0]);
+  write(STDOUT_FILENO, buf, l);
+}
+
+void infinite_mode_info(void)
+{
+  if (s.line_coords[0][1] <= 2)
+    return;
+  char minibuf[] = "\x1b[1mInfinite mode\x1b[0m";
+  int l;
+  l = sizeof(minibuf) - 1;
+  l -= 8;
+  char buf[64];
+  l = snprintf(buf, sizeof(buf), "\x1b[%d;%dH\x1b[2K%s\x1b[%d;%dH",
+               s.line_coords[0][1] - 2, (s.cols - l) / 2, minibuf,
+               s.cursor_pos[1], s.cursor_pos[0]);
+  write(STDOUT_FILENO, buf, l);
+}
+
+void update_info(void)
+{
+  switch (s.mode) {
+  case TIME_MODE:
+    time_mode_info();
+    break;
+  case WORD_MODE:
+    word_mode_info();
+    break;
+  case INFINITE_MODE:
+    infinite_mode_info();
+    break;
+  }
+}
+
+void process_keystroke(char c)
+{
+  static int line = 0, word = 0, ch = 0;
+  static int mistakes_in_word = 0; // for tracking if word already had mistakes
+  static uint8_t mistakes_buf[16];
+  char word_char = *(s.words[line * 10 + word] + ch);
+  if (c == '\b' || c == 127) {
+    if (ch == 0)
+      return;
+    --s.cursor_pos[0];
+    --ch;
+    --s.chars;
+    if (mistakes_buf[ch]) {
+      --s.chars_typed;
+      --mistakes_in_word;
     }
-    char c = read_char();
-    if (c == '\x11')
-      return (s.chars == 0) ? 0.0f : (float)s.chars_typed / s.chars;
-    if (c == ' ') {
-      if (*(s.words[line * 10 + word] + ch) == '\0') {
-        if (word < 9) {
-          ++word;
-          ++s.completed_words;
-          ch = 0;
-          if (mistakes_in_word > 0)
-            ++s.wrong_words;
-          mistakes_in_word = 0;
-          write(STDOUT_FILENO, "\x1b[C", 4);
-        }
+    char buf[3];
+    buf[0] = '\b';
+    buf[1] = *(s.words[line * 10 + word] + ch);
+    buf[2] = '\b';
+    write(STDOUT_FILENO, buf, 3);
+  } else if (c == ' ') {
+    if (word_char == '\0') {
+      if (word < 9) {
+        ++s.cursor_pos[0];
+        ++word;
+        ++s.completed_words;
+        ch = 0;
+        if (mistakes_in_word > 0)
+          ++s.wrong_words;
+        mistakes_in_word = 0;
+        write(STDOUT_FILENO, "\x1b[C", 4);
       }
-    } else if (c == '\r') {
-      if (*(s.words[line * 10 + word] + ch) == '\0') {
-        if (word == 9) {
-          if (line == 9) {
-            ++s.completed_words;
-            line = 0;
-            word = 0;
-            ch = 0;
-            if (mistakes_in_word > 0)
-              ++s.wrong_words;
-            mistakes_in_word = 0;
-            write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
-            draw_text();
-            continue;
-          }
-          ++line;
+    }
+  } else if (c == '\r') {
+    if (word_char == '\0') {
+      if (word == 9) {
+        if (line == 9) {
           ++s.completed_words;
+          line = 0;
           word = 0;
           ch = 0;
           if (mistakes_in_word > 0)
             ++s.wrong_words;
           mistakes_in_word = 0;
-          char buf[16];
-          sprintf(buf, "\x1b[%d;%dH", s.line_coords[line][1],
-                  s.line_coords[line][0]);
-          write(STDOUT_FILENO, buf, strlen(buf));
+          write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
+          draw_text();
+          return;
         }
-      } else {
+        ++line;
+        ++s.completed_words;
+        word = 0;
+        ch = 0;
+        if (mistakes_in_word > 0)
+          ++s.wrong_words;
+        mistakes_in_word = 0;
+        s.cursor_pos[0] = s.line_coords[line][0];
+        s.cursor_pos[1] = s.line_coords[line][1];
         char buf[16];
-        sprintf(buf, "\x1b[1;91m%c\x1b[0m", *(s.words[line * 10 + word] + ch));
+        sprintf(buf, "\x1b[%d;%dH", s.line_coords[line][1],
+                s.line_coords[line][0]);
         write(STDOUT_FILENO, buf, strlen(buf));
-        ++ch;
-        ++s.chars;
-        ++mistakes_in_word;
       }
-    } else if (c == *(s.words[line * 10 + word] + ch)) {
+    } else {
       char buf[16];
-      sprintf(buf, "\x1b[1;92m%c\x1b[0m", c);
+      sprintf(buf, "\x1b[1;91m%c\x1b[0m", word_char);
       write(STDOUT_FILENO, buf, strlen(buf));
-      ++ch;
-      ++s.chars;
-      ++s.chars_typed;
-    } else if (*(s.words[line * 10 + word] + ch) != '\0') {
-      char buf[16];
-      sprintf(buf, "\x1b[1;91m%c\x1b[0m", *(s.words[line * 10 + word] + ch));
-      write(STDOUT_FILENO, buf, strlen(buf));
-      ++ch;
+      mistakes_buf[ch++] = 1;
       ++s.chars;
       ++mistakes_in_word;
+      ++s.cursor_pos[0];
     }
+  } else if (c == word_char) {
+    char buf[16];
+    sprintf(buf, "\x1b[1;92m%c\x1b[0m", c);
+    write(STDOUT_FILENO, buf, strlen(buf));
+    mistakes_buf[ch++] = 0;
+    ++s.chars;
+    ++s.chars_typed;
+    ++s.cursor_pos[0];
+  } else if (word_char != '\0') {
+    char buf[16];
+    sprintf(buf, "\x1b[1;91m%c\x1b[0m", word_char);
+    write(STDOUT_FILENO, buf, strlen(buf));
+    mistakes_buf[ch++] = 1;
+    ++s.chars;
+    ++mistakes_in_word;
+    ++s.cursor_pos[0];
+  }
+}
+
+int read_char_and_update()
+{
+  char c;
+  while (read(STDIN_FILENO, &c, 1) <= 0) {
+    switch (s.mode) {
+    case TIME_MODE:
+      if (time(NULL) - s.time_start >= s.mode_value)
+        return -1;
+      break;
+    case WORD_MODE:
+      if (s.completed_words >= s.mode_value)
+        return -1;
+      break;
+    case INFINITE_MODE:
+      // infinite mode, it doesnt end so no return
+      break;
+    }
+    update_info();
+  }
+  return (int)c;
+}
+
+void loop(void)
+{
+  s.chars = 0;
+  s.chars_typed = 0;
+  s.completed_words = 0;
+  s.wrong_words = 0;
+
+  int c = read_char();
+  s.time_start = time(NULL);
+  while (1) {
+    if (c == '\x11' || c == -1)
+      return;
+    process_keystroke(c);
+
+    c = read_char_and_update();
   }
 }
 
@@ -308,12 +420,12 @@ int main(int argc, char *argv[])
     break;
   }
 
+  s.time_start = 0;
   srand(time(NULL));
   enter_raw_mode();
   draw_text();
-  s.time_start = time(NULL);
-  float accuracy = loop();
-  time_t time2 = time(NULL);
-  display_specs((int)(time2 - s.time_start), accuracy);
+  update_info();
+  loop();
+  display_specs();
   return 0;
 }
