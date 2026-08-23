@@ -264,7 +264,7 @@ void process_keystroke(char c)
 {
   static int line = 0, word = 0, ch = 0;
   static int mistakes_in_word = 0; // for tracking if word already had mistakes
-  static uint8_t mistakes_buf[16];
+  static uint8_t mistakes_buf[16] = {0};
   char word_char = *(s.words[line * 10 + word] + ch);
   if (c == '\b' || c == 127) {
     if (ch == 0)
@@ -273,8 +273,10 @@ void process_keystroke(char c)
     --ch;
     --s.chars;
     if (mistakes_buf[ch]) {
-      --s.chars_typed;
       --mistakes_in_word;
+      mistakes_buf[ch] = 0;
+    } else {
+      --s.chars_typed;
     }
     char buf[3];
     buf[0] = '\b';
