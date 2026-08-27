@@ -11,19 +11,21 @@
 
 #define VERSION "1.1.1"
 
+#define WORDS 10
+#define LINES 10
+
 enum mode { TIME_MODE, WORD_MODE, INFINITE_MODE };
 
 struct state {
   struct termios orig_state;
   enum mode mode;
-  char *words[100];
+  char *words[WORDS * LINES];
   int chars, chars_typed;
   int completed_words;
   int cursor_pos[2];
-  int line_coords[10][2];
+  int line_coords[LINES][2];
   int mode_value;
   int rows, cols;
-  int word_sizes[10];
   int wrong_words;
   time_t time_start;
 };
@@ -75,29 +77,27 @@ void draw_text(void)
   char buf[s.cols * s.rows];
   int i = 0;
   int x, y = 1;
-  for (; i < (s.rows - 10) / 2;) {
-    buf[i++] = '\n';
+  for (int indx = i; indx < (s.rows - LINES) / 2; ++indx) {
     ++y;
   }
 
-  for (int a = 0; a < 10; ++a) {
+  for (int a = 0; a < LINES; ++a) {
     x = 1;
     char mini_buf[s.cols];
     int j = 0;
-    for (int b = 0; b < 10; ++b) {
+    for (int b = 0; b < WORDS; ++b) {
       const char *str = text_data[rand() % WORDS_ARRAY_SIZE];
-      s.words[a * 10 + b] = (char *)str;
+      s.words[a * WORDS + b] = (char *)str;
       int str_size = strlen(str);
-      s.word_sizes[b] = str_size;
       memcpy(mini_buf + j, str, str_size);
       j += str_size;
-      mini_buf[j++] = (b != 9) ? ' ' : '\n';
+      mini_buf[j++] = (b != WORDS - 1) ? ' ' : '\n';
     }
     buf[i++] = '\r';
     for (int u = 0; u < (s.cols - j) / 2; ++u) {
-      buf[i++] = ' ';
       ++x;
     }
+    i += sprintf(buf + i, "\x1b[%d;%dH", y, x);
     s.line_coords[a][0] = x;
     s.line_coords[a][1] = y;
     memcpy(buf + i, mini_buf, j);
@@ -265,7 +265,7 @@ void process_keystroke(char c)
   static int line = 0, word = 0, ch = 0;
   static int mistakes_in_word = 0; // for tracking if word already had mistakes
   static uint8_t mistakes_buf[16] = {0};
-  char word_char = *(s.words[line * 10 + word] + ch);
+  char word_char = *(s.words[line * WORDS + word] + ch);
   if (c == '\b' || c == 127) {
     if (ch == 0)
       return;
@@ -280,12 +280,12 @@ void process_keystroke(char c)
     }
     char buf[3];
     buf[0] = '\b';
-    buf[1] = *(s.words[line * 10 + word] + ch);
+    buf[1] = *(s.words[line * WORDS + word] + ch);
     buf[2] = '\b';
     write(STDOUT_FILENO, buf, 3);
   } else if (c == ' ') {
     if (word_char == '\0') {
-      if (word < 9) {
+      if (word < WORDS - 1) {
         ++s.cursor_pos[0];
         ++word;
         ++s.completed_words;
@@ -298,8 +298,8 @@ void process_keystroke(char c)
     }
   } else if (c == '\r') {
     if (word_char == '\0') {
-      if (word == 9) {
-        if (line == 9) {
+      if (word == WORDS - 1) {
+        if (line == LINES - 1) {
           ++s.completed_words;
           line = 0;
           word = 0;
