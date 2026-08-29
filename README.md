@@ -11,7 +11,9 @@ on Linux/MacOS run
 git clone https://github.com/wpdjnt/Keypace
 cd keypace
 
-# build and install
-chmod +x install.sh
+# install
 ./install.sh
+
+# uninstall
+./uninstall.sh
 ```
