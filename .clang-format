@@ -3,6 +3,6 @@ BreakBeforeBraces: Custom
 BraceWrapping:
   AfterControlStatement: Never
   AfterFunction: true
-IndentWidth: 2
-TabWidth: 2
+IndentWidth: 4
+TabWidth: 4
 UseTab: Never
