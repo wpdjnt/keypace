@@ -16,4 +16,10 @@ cd keypace
 
 # uninstall
 ./uninstall.sh
+
+# usage
+keypace
+
+# help
+keypace -h
 ```
