@@ -8,7 +8,7 @@ on Linux/MacOS run
 
 ```bash
 # clone the repository
-git clone https://github.com/wpdjnt/Keypace
+git clone https://github.com/wpdjnt/keypace.git
 cd keypace
 
 # install
