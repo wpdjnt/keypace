@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "data.h"
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,425 +10,455 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "1.1.1"
+#define VERSION "1.2.1"
 
-#define WORDS 10
-#define LINES 10
+#define WORDS_MAX 10
+#define LINES_MAX 10
 
+enum char_ident { RIGHT_CHAR, WRONG_CHAR };
 enum mode { TIME_MODE, WORD_MODE, INFINITE_MODE };
 
+struct vec2 {
+    int x;
+    int y;
+};
+
 struct state {
-  struct termios orig_state;
-  enum mode mode;
-  char *words[WORDS * LINES];
-  int chars, chars_typed;
-  int completed_words;
-  int cursor_pos[2];
-  int line_coords[LINES][2];
-  int mode_value;
-  int rows, cols;
-  int wrong_words;
-  time_t time_start;
+    struct termios orig;
+    struct vec2 cursor_pos;
+    struct vec2 *line_coords;
+    enum mode mode;
+    char **lines;
+    int chars, chars_typed;
+    int line_amount, word_amount;
+    int max_word_size;
+    int rows, cols;
+    int wrong_words;
+    time_t time_start;
+    unsigned int compl_words;
+    unsigned int mode_val;
 };
 
 struct state s;
 
+void program_write(const char *restrict buf, size_t size);
+
+// max & min
+
 int max(int a, int b) { return (a > b) ? a : b; }
+
+int min(int a, int b) { return (a < b) ? a : b; }
+
+// error handling
+
+_Noreturn void die(const char *msg)
+{
+    printf("Error: %s\n", msg);
+    exit(errno);
+}
+
+// terminal settings
 
 void get_window_size(int *width, int *height)
 {
-  struct winsize ws;
+    struct winsize ws;
 
-  ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws);
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1)
+        die("ioctl");
 
-  *width = ws.ws_col;
-  *height = ws.ws_row;
+    *width = ws.ws_col;
+    *height = ws.ws_row;
+    if (*width <= 1 || *height <= 1)
+        die("get window size");
 }
 
 void exit_raw_mode(void)
 {
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &s.orig_state);
-
-  write(STDOUT_FILENO, "\033[?1049l", 8);
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &s.orig) == -1)
+        die("tcsetattr");
 }
 
 void enter_raw_mode(void)
 {
-  atexit(exit_raw_mode);
-  tcgetattr(STDIN_FILENO, &s.orig_state);
+    atexit(exit_raw_mode);
+    if (tcgetattr(STDIN_FILENO, &s.orig) == -1)
+        die("tcgetattr");
 
-  struct termios raw = s.orig_state;
+    struct termios raw = s.orig;
 
-  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-  raw.c_oflag &= ~(OPOST);
-  raw.c_cflag |= (CS8);
-  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-  raw.c_cc[VMIN] = 0;
-  raw.c_cc[VTIME] = 1;
+    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw.c_oflag &= ~(OPOST);
+    raw.c_cflag |= (CS8);
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 1;
 
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
+        die("tcsetattr");
+}
 
-  get_window_size(&s.cols, &s.rows);
+// setup & cleanup
 
-  write(STDOUT_FILENO, "\033[?1049h", 8);
+size_t get_max_word_size()
+{
+    size_t sz = 0;
+    for (int i = 0; i < WORDS_ARRAY_SIZE; ++i)
+        sz = max(sz, strlen(text_data[i]));
+    return sz;
+}
+
+void program_exit(void)
+{
+    if (s.lines != NULL) {
+        for (int i = 0; i < s.line_amount; ++i)
+            free(s.lines[i]);
+        free(s.lines);
+    }
+    if (s.line_coords != NULL)
+        free(s.line_coords);
+    s.lines = NULL;
+    s.line_coords = NULL;
+
+    exit_raw_mode();
+    program_write("\033[?1049l", 8);
+}
+
+void program_init(void)
+{
+    atexit(program_exit);
+    enter_raw_mode();
+    get_window_size(&s.cols, &s.rows);
+    srand(time(NULL));
+    s.time_start = 0;
+
+    s.max_word_size = get_max_word_size();
+    if ((s.line_amount = min(LINES_MAX, s.rows - 2)) < 3)
+        die("Size of a terminal is too small");
+    if ((s.word_amount = min(WORDS_MAX, s.cols / s.max_word_size)) == 0)
+        die("Size of a terminal is too small");
+
+    if ((s.lines = malloc(s.line_amount * sizeof(char *))) == NULL)
+        die("Failed to allocate memory");
+    for (int i = 0; i < s.line_amount; ++i) {
+        if ((s.lines[i] = malloc(s.word_amount * (s.max_word_size + 1))) ==
+            NULL)
+            die("Failed to allocate memory");
+    }
+    if ((s.line_coords = malloc(s.line_amount * sizeof(struct vec2))) == NULL)
+        die("Failed to allocate memory");
+
+    program_write("\033[?1049h", 8);
+}
+
+// program input
+
+char read_char(void)
+{
+    char c;
+    int r;
+
+    while ((r = read(STDIN_FILENO, &c, 1)) != 1)
+        if (r == -1)
+            die("read char");
+
+    return c;
+}
+
+int read_char_update(void)
+{
+    void update_info(void);
+
+    char c;
+    while (read(STDIN_FILENO, &c, 1) <= 0) {
+        switch (s.mode) {
+        case TIME_MODE:
+            if (time(NULL) - s.time_start >= s.mode_val)
+                return -1;
+            break;
+        case WORD_MODE:
+            if (s.compl_words >= s.mode_val)
+                return -1;
+            break;
+        case INFINITE_MODE:
+            // infinite mode, it doesnt end so no return
+            break;
+        }
+        update_info();
+    }
+    return (int)c;
+}
+
+// program output
+
+void program_write(const char *restrict buf, size_t size)
+{
+    fwrite(buf, 1, size, stdout);
+    fflush(stdout);
+}
+
+_Noreturn void display_help(void)
+{
+    char *message =
+        "Keypace usage:\n"
+        " -h show help message\n"
+        " -v show version\n"
+        " -t time mode\n"
+        " -w word mode\n"
+        " -i infinite mode\n\n"
+        "Mode describtion:\n"
+        " time mode:\n"
+        "  ends after a certain amount of time has pased\n"
+        "  -t flag accepts a time value, specified in seconds\n"
+        "  if specified value is less than 10 seconds, then it will "
+        "be defaulted to 10\n"
+        " word mode:\n"
+        "  ends after a certain amount of words has been typed\n"
+        "  -w flag accepts a number of words needed to be typed\n"
+        "  if specified value is less than 10 words, then it will be "
+        "defaulted to 10\n"
+        " infinite mode:\n"
+        "  runs indefinitely, press Ctrl+q to terminate";
+    puts(message);
+    exit(0);
+}
+
+_Noreturn void display_version(void)
+{
+    puts("Keypase version " VERSION);
+    exit(0);
+}
+
+void gen_text(void)
+{
+    int i;
+    int x, y = (s.rows - s.line_amount) / 2 + 1;
+
+    if (s.rows <= LINES_MAX + 2)
+        y += 2;
+
+    for (int a = 0; a < s.line_amount; ++a) {
+        i = 0;
+        for (int b = 0; b < s.word_amount; ++b) {
+            i += sprintf(s.lines[a] + i, "%s",
+                         text_data[rand() % WORDS_ARRAY_SIZE]);
+            s.lines[a][i++] = (b < s.word_amount - 1) ? ' ' : '\0';
+        }
+        x = (s.cols - i) / 2 + 1;
+        s.line_coords[a] = (struct vec2){x, y};
+        ++y;
+    }
 }
 
 void draw_text(void)
 {
-  char buf[s.cols * s.rows];
-  int i = 0;
-  int x, y = 1;
-  for (int indx = i; indx < (s.rows - LINES) / 2; ++indx) {
-    ++y;
-  }
+    char buf[s.line_amount * (10 + s.cols) +
+             12]; // 12 is for moving cursor escape sequence
+    int i = 0;
 
-  for (int a = 0; a < LINES; ++a) {
-    x = 1;
-    char mini_buf[s.cols];
-    int j = 0;
-    for (int b = 0; b < WORDS; ++b) {
-      const char *str = text_data[rand() % WORDS_ARRAY_SIZE];
-      s.words[a * WORDS + b] = (char *)str;
-      int str_size = strlen(str);
-      memcpy(mini_buf + j, str, str_size);
-      j += str_size;
-      mini_buf[j++] = (b != WORDS - 1) ? ' ' : '\n';
+    s.cursor_pos = s.line_coords[0];
+
+    for (int a = 0; a < s.line_amount; ++a) {
+        i += snprintf(buf + i, sizeof buf - i, "\x1b[%d;%dH%s",
+                      s.line_coords[a].y, s.line_coords[a].x, s.lines[a]);
     }
-    buf[i++] = '\r';
-    for (int u = 0; u < (s.cols - j) / 2; ++u) {
-      ++x;
-    }
-    i += sprintf(buf + i, "\x1b[%d;%dH", y, x);
-    s.line_coords[a][0] = x;
-    s.line_coords[a][1] = y;
-    memcpy(buf + i, mini_buf, j);
-    i += j;
-    y += 1;
-  }
-  s.cursor_pos[0] = s.line_coords[0][0];
-  s.cursor_pos[1] = s.line_coords[0][1];
-  char cursor_buf[32];
-  sprintf(cursor_buf, "\x1b[%d;%dH", s.line_coords[0][1], s.line_coords[0][0]);
-  write(STDOUT_FILENO, buf, i);
-  write(STDOUT_FILENO, cursor_buf, strlen(cursor_buf));
-}
-
-char read_char(void)
-{
-  char c;
-  while (read(STDIN_FILENO, &c, 1) <= 0)
-    ;
-  return c;
-}
-
-void display_help(void)
-{
-  char *message = "Keypace usage:\n"
-                  " -h show help message\n"
-                  " -v show version\n"
-                  " -t time mode\n"
-                  " -w word mode\n"
-                  " -i infinite mode\n\n"
-                  "Mode describtion:\n"
-                  " time mode:\n"
-                  "  ends after a certain amount of time has pased\n"
-                  "  -t flag accepts a time value, specified in seconds\n"
-                  "  if specified value is less than 10 seconds, then it will "
-                  "be defaulted to 10\n"
-                  " word mode:\n"
-                  "  ends after a certain amount of words has been typed\n"
-                  "  -w flag accepts a number of words needed to be typed\n"
-                  "  if specified value is less than 10 words, then it will be "
-                  "defaulted to 10\n"
-                  " infinite mode:\n"
-                  "  runs indefinitely, press Ctrl+q to terminate";
-  puts(message);
-  exit(0);
-}
-
-void display_version(void)
-{
-  puts("Keypase version " VERSION);
-  exit(0);
+    i += snprintf(buf + i, sizeof buf - i, "\x1b[%d;%dH", s.cursor_pos.y,
+                  s.cursor_pos.x);
+    program_write(buf, i);
 }
 
 void display_specs(void)
 {
-  int t = (int)(time(NULL) - s.time_start);
-  float accuracy = (s.chars == 0) ? 0.0f : (float)s.chars_typed / s.chars;
-  if (t == 0)
-    return;
+    int t = (int)(time(NULL) - s.time_start);
+    if (t == 0)
+        return;
+    float accuracy =
+        (s.chars == 0) ? 0.0f : 100.0f * (float)s.chars_typed / s.chars;
+    int raw_wpm = (int)(((float)s.chars / 5.0f) / ((float)t / 60.0f));
+    int net_wpm = raw_wpm - s.wrong_words;
 
-  char buf[512];
-  int i = 0;
-  for (; i < (s.rows - 2) / 2;)
-    buf[i++] = '\n';
-  char line1[32], line2[32], line3[32], line4[32];
-  int wpm_raw = (int)(((float)s.chars / 5) / ((float)t / 60.0));
-  sprintf(line1, "Raw WPM: %d\n\r", wpm_raw);
-  sprintf(line4, "Net WPM: %d\n\r",
-          wpm_raw - (int)(s.wrong_words / ((float)t / 60)));
-  sprintf(line3, "Words typed: %d\n\r", s.completed_words);
-  sprintf(line2, "Accuracy: %.2f%%", accuracy * 100);
-  for (int j = 0; j < (s.cols - (int)strlen(line1)) / 2; ++j)
-    buf[i++] = ' ';
-  memcpy(buf + i, line1, strlen(line1));
-  i += strlen(line1);
-  for (int j = 0; j < (s.cols - (int)strlen(line4)) / 2; ++j)
-    buf[i++] = ' ';
-  memcpy(buf + i, line4, strlen(line4));
-  i += strlen(line4);
-  for (int j = 0; j < (s.cols - (int)strlen(line3)) / 2; ++j)
-    buf[i++] = ' ';
-  memcpy(buf + i, line3, strlen(line3));
-  i += strlen(line3);
-  for (int j = 0; j < (s.cols - (int)strlen(line2)) / 2; ++j)
-    buf[i++] = ' ';
-  memcpy(buf + i, line2, strlen(line2));
-  i += strlen(line2);
-  write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
-  write(STDOUT_FILENO, buf, i);
+    char raw_wpm_str[32], net_wpm_str[32], words_typed[32], time[32],
+        accuracy_str[32];
+    char buf[256];
+    int i = 0, l;
+    int y = (s.rows - 5) / 2;
 
-  char c;
-  do {
-    c = read_char();
-  } while (!(c == '\x11' || c == '\r'));
-}
+    l = snprintf(raw_wpm_str, sizeof raw_wpm_str, "Raw WPM: %d", raw_wpm);
+    i += snprintf(buf + i, sizeof buf - i, "\x1b[%d;%dH%s", y++,
+                  (s.cols - l) / 2, raw_wpm_str);
+    l = snprintf(net_wpm_str, sizeof net_wpm_str, "Net WPM: %d", net_wpm);
+    i += snprintf(buf + i, sizeof buf - i, "\x1b[%d;%dH%s", y++,
+                  (s.cols - l) / 2, net_wpm_str);
+    l = snprintf(accuracy_str, sizeof accuracy_str, "Accuracy: %.2f%%",
+                 accuracy);
+    i += snprintf(buf + i, sizeof buf - i, "\x1b[%d;%dH%s", y++,
+                  (s.cols - l) / 2, accuracy_str);
+    l = snprintf(words_typed, sizeof words_typed, "Words written: %d",
+                 s.compl_words);
+    i += snprintf(buf + i, sizeof buf - i, "\x1b[%d;%dH%s", y++,
+                  (s.cols - l) / 2, words_typed);
+    l = snprintf(time, sizeof time, "Time: %ds", t);
+    i += snprintf(buf + i, sizeof buf - i, "\x1b[%d;%dH%s", y++,
+                  (s.cols - l) / 2, time);
 
-void time_mode_info(void)
-{
-  if (s.line_coords[0][1] <= 2)
-    return;
-  char minibuf[32];
-  int l;
-  l = snprintf(minibuf, sizeof(minibuf), "\x1b[1mTime left: %ds\x1b[0m",
-               (s.time_start == 0)
-                   ? s.mode_value
-                   : s.mode_value - (int)(time(NULL) - s.time_start));
-  minibuf[l] = '\0';
-  l -= 8;
-  char buf[64];
-  l = snprintf(buf, sizeof(buf), "\x1b[%d;%dH\x1b[2K%s\x1b[%d;%dH",
-               s.line_coords[0][1] - 2, (s.cols - l) / 2, minibuf,
-               s.cursor_pos[1], s.cursor_pos[0]);
-  write(STDOUT_FILENO, buf, l);
-}
+    program_write("\x1b[2J\x1b[H", 7);
+    program_write(buf, i);
 
-void word_mode_info(void)
-{
-  if (s.line_coords[0][1] <= 2)
-    return;
-  char minibuf[32];
-  int l;
-  l = snprintf(minibuf, sizeof(minibuf), "\x1b[1mWords to type: %d\x1b[0m",
-               s.mode_value - s.completed_words);
-  minibuf[l] = '\0';
-  l -= 8;
-  char buf[64];
-  l = snprintf(buf, sizeof(buf), "\x1b[%d;%dH\x1b[2K%s\x1b[%d;%dH",
-               s.line_coords[0][1] - 2, (s.cols - l) / 2, minibuf,
-               s.cursor_pos[1], s.cursor_pos[0]);
-  write(STDOUT_FILENO, buf, l);
-}
-
-void infinite_mode_info(void)
-{
-  if (s.line_coords[0][1] <= 2)
-    return;
-  char minibuf[] = "\x1b[1mInfinite mode\x1b[0m";
-  int l;
-  l = sizeof(minibuf) - 1;
-  l -= 8;
-  char buf[64];
-  l = snprintf(buf, sizeof(buf), "\x1b[%d;%dH\x1b[2K%s\x1b[%d;%dH",
-               s.line_coords[0][1] - 2, (s.cols - l) / 2, minibuf,
-               s.cursor_pos[1], s.cursor_pos[0]);
-  write(STDOUT_FILENO, buf, l);
+    char c;
+    do {
+        c = read_char();
+    } while (!(c == '\x11' || c == '\r'));
 }
 
 void update_info(void)
 {
-  switch (s.mode) {
-  case TIME_MODE:
-    time_mode_info();
-    break;
-  case WORD_MODE:
-    word_mode_info();
-    break;
-  case INFINITE_MODE:
-    infinite_mode_info();
-    break;
-  }
-}
-
-void process_keystroke(char c)
-{
-  static int line = 0, word = 0, ch = 0;
-  static int mistakes_in_word = 0; // for tracking if word already had mistakes
-  static uint8_t mistakes_buf[16] = {0};
-  char word_char = *(s.words[line * WORDS + word] + ch);
-  if (c == '\b' || c == 127) {
-    if (ch == 0)
-      return;
-    --s.cursor_pos[0];
-    --ch;
-    --s.chars;
-    if (mistakes_buf[ch]) {
-      --mistakes_in_word;
-      mistakes_buf[ch] = 0;
-    } else {
-      --s.chars_typed;
-    }
-    char buf[3];
-    buf[0] = '\b';
-    buf[1] = *(s.words[line * WORDS + word] + ch);
-    buf[2] = '\b';
-    write(STDOUT_FILENO, buf, 3);
-  } else if (c == ' ') {
-    if (word_char == '\0') {
-      if (word < WORDS - 1) {
-        ++s.cursor_pos[0];
-        ++word;
-        ++s.completed_words;
-        ch = 0;
-        if (mistakes_in_word > 0)
-          ++s.wrong_words;
-        mistakes_in_word = 0;
-        write(STDOUT_FILENO, "\x1b[C", 4);
-      }
-    }
-  } else if (c == '\r') {
-    if (word_char == '\0') {
-      if (word == WORDS - 1) {
-        if (line == LINES - 1) {
-          ++s.completed_words;
-          line = 0;
-          word = 0;
-          ch = 0;
-          if (mistakes_in_word > 0)
-            ++s.wrong_words;
-          mistakes_in_word = 0;
-          write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
-          draw_text();
-          return;
-        }
-        ++line;
-        ++s.completed_words;
-        word = 0;
-        ch = 0;
-        if (mistakes_in_word > 0)
-          ++s.wrong_words;
-        mistakes_in_word = 0;
-        s.cursor_pos[0] = s.line_coords[line][0];
-        s.cursor_pos[1] = s.line_coords[line][1];
-        char buf[16];
-        sprintf(buf, "\x1b[%d;%dH", s.line_coords[line][1],
-                s.line_coords[line][0]);
-        write(STDOUT_FILENO, buf, strlen(buf));
-      }
-    } else {
-      char buf[16];
-      sprintf(buf, "\x1b[1;91m%c\x1b[0m", word_char);
-      write(STDOUT_FILENO, buf, strlen(buf));
-      mistakes_buf[ch++] = 1;
-      ++s.chars;
-      ++mistakes_in_word;
-      ++s.cursor_pos[0];
-    }
-  } else if (c == word_char) {
-    char buf[16];
-    sprintf(buf, "\x1b[1;92m%c\x1b[0m", c);
-    write(STDOUT_FILENO, buf, strlen(buf));
-    mistakes_buf[ch++] = 0;
-    ++s.chars;
-    ++s.chars_typed;
-    ++s.cursor_pos[0];
-  } else if (word_char != '\0') {
-    char buf[16];
-    sprintf(buf, "\x1b[1;91m%c\x1b[0m", word_char);
-    write(STDOUT_FILENO, buf, strlen(buf));
-    mistakes_buf[ch++] = 1;
-    ++s.chars;
-    ++mistakes_in_word;
-    ++s.cursor_pos[0];
-  }
-}
-
-int read_char_and_update()
-{
-  char c;
-  while (read(STDIN_FILENO, &c, 1) <= 0) {
+    char buf[256], mini_buf[32];
+    int i = 0, l = 0;
     switch (s.mode) {
     case TIME_MODE:
-      if (time(NULL) - s.time_start >= s.mode_value)
-        return -1;
-      break;
+        l = snprintf(mini_buf, sizeof mini_buf, "Time mode: %ds",
+                     (s.time_start != 0)
+                         ? s.mode_val - (int)(time(NULL) - s.time_start)
+                         : s.mode_val);
+        break;
     case WORD_MODE:
-      if (s.completed_words >= s.mode_value)
-        return -1;
-      break;
+        l = snprintf(mini_buf, sizeof mini_buf, "Word mode: %d",
+                     s.mode_val - s.compl_words);
+        break;
     case INFINITE_MODE:
-      // infinite mode, it doesnt end so no return
-      break;
+        l = snprintf(mini_buf, sizeof mini_buf, "Infinite mode");
+        break;
     }
-    update_info();
-  }
-  return (int)c;
+    i += snprintf(
+        buf + i, sizeof buf - i, "\x1b[%d;%dH\r\x1b[K\x1b[%d;%dH%s\x1b[%d;%dH",
+        s.line_coords[0].y - 2, (s.cols - l) / 2, s.line_coords[0].y - 2,
+        (s.cols - l) / 2, mini_buf, s.cursor_pos.y, s.cursor_pos.x);
+    program_write(buf, i);
 }
+
+// process stuff
+
+void process_args(int argc, char **argv)
+{
+    switch (getopt(argc, argv, "hivt:w:")) {
+    case 'h':
+        display_help();
+        break;
+    case 't':
+        s.mode = TIME_MODE;
+        s.mode_val = max(atoi(optarg), 10);
+        break;
+    case 'w':
+        s.mode = WORD_MODE;
+        s.mode_val = max(atoi(optarg), 10);
+        break;
+    case 'i':
+        s.mode = INFINITE_MODE;
+        break;
+    case 'v':
+        display_version();
+        break;
+    case '?':
+        die("Unknown option or missing argument, see -h for help");
+    default:
+        s.mode = TIME_MODE;
+        s.mode_val = 30;
+        break;
+    }
+}
+
+void process_key(char c, enum char_ident *mistakes_buf)
+{
+    static int line = 0, ch = 0, mistake_count = 0;
+    ;
+    char target = s.lines[line][ch];
+
+    if (c == '\b' || c == 127) {
+        if (ch == 0)
+            return;
+        --ch;
+        --s.cursor_pos.x;
+        --s.chars;
+        if (mistakes_buf[ch] == RIGHT_CHAR)
+            --s.chars_typed;
+        char buf[3];
+        buf[0] = '\b';
+        buf[1] = s.lines[line][ch];
+        buf[2] = '\b';
+        program_write(buf, 3);
+    } else if (c == '\n' || c == '\r') {
+        if (target != '\0')
+            return;
+        ++s.compl_words;
+        if (mistake_count > 0)
+            ++s.wrong_words;
+        mistake_count = 0;
+        ch = 0;
+        if (line == s.line_amount - 1) {
+            line = 0;
+            program_write("\x1b[2J\x1b[H", 7);
+            gen_text();
+            draw_text();
+        } else {
+            ++line;
+            s.cursor_pos = s.line_coords[line];
+            char buf[11];
+            int l = snprintf(buf, sizeof buf, "\x1b[%d;%dH", s.cursor_pos.y,
+                             s.cursor_pos.x);
+            program_write(buf, l);
+        }
+    } else {
+        if (c != target && (target == ' ' || target == '\0' || c == '\x1b'))
+            return;
+        ++s.cursor_pos.x;
+        ++s.chars;
+        if (c == target) {
+            ++s.chars_typed;
+            mistakes_buf[ch++] = RIGHT_CHAR;
+            if (c == ' ') {
+                ++s.compl_words;
+                if (mistake_count > 0)
+                    ++s.wrong_words;
+                mistake_count = 0;
+            }
+        } else {
+            mistakes_buf[ch++] = WRONG_CHAR;
+            ++mistake_count;
+        }
+        char buf[11];
+        int l = snprintf(
+            buf, sizeof buf,
+            (c == target) ? "\x1b[92m%c\x1b[0m" : "\x1b[91m%c\x1b[0m", target);
+        program_write(buf, l);
+    }
+}
+
+// main
 
 void loop(void)
 {
-  s.chars = 0;
-  s.chars_typed = 0;
-  s.completed_words = 0;
-  s.wrong_words = 0;
+    int c = read_char();
+    s.time_start = time(NULL);
+    enum char_ident mistakes_buf[(s.max_word_size + 1) * s.word_amount];
+    s.compl_words = 0;
+    s.wrong_words = 0;
 
-  int c = read_char();
-  s.time_start = time(NULL);
-  while (1) {
-    if (c == '\x11' || c == -1)
-      return;
-    process_keystroke(c);
-
-    c = read_char_and_update();
-  }
+    while (1) {
+        if (c == '\x11')
+            return;
+        process_key((char)c, mistakes_buf);
+        if ((c = read_char_update()) == -1)
+            return;
+    }
 }
 
-int main(int argc, char *argv[])
+int main(int argc, char **argv)
 {
-  switch (getopt(argc, argv, "hivt:w:")) {
-  case 'h':
-    display_help();
-    break;
-  case 't':
-    s.mode = TIME_MODE;
-    s.mode_value = max(atoi(optarg), 10);
-    break;
-  case 'w':
-    s.mode = WORD_MODE;
-    s.mode_value = max(atoi(optarg), 10);
-    break;
-  case 'i':
-    s.mode = INFINITE_MODE;
-    break;
-  case 'v':
-    display_version();
-    break;
-  case '?':
-    puts("Unknown option or missing argument, see -h for help");
+    process_args(argc, argv);
+    program_init();
+    gen_text();
+    draw_text();
+    update_info();
+    loop();
+    display_specs();
     return 0;
-  default:
-    s.mode = TIME_MODE;
-    s.mode_value = 30;
-    break;
-  }
-
-  s.time_start = 0;
-  srand(time(NULL));
-  enter_raw_mode();
-  draw_text();
-  update_info();
-  loop();
-  display_specs();
-  return 0;
 }
