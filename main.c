@@ -33,7 +33,6 @@ struct state {
     int line_amount, word_amount;
     int max_word_size;
     int rows, cols;
-    int wrong_words;
     time_t time_start;
     unsigned int compl_words;
     unsigned int mode_val;
@@ -137,7 +136,7 @@ void program_init(void)
     if ((s.word_amount = min(WORDS_MAX, s.cols / s.max_word_size)) == 0)
         die("Size of a terminal is too small");
 
-    if ((s.lines = malloc(s.line_amount * sizeof(char *))) == NULL)
+    if ((s.lines = calloc(s.line_amount, sizeof(char *))) == NULL)
         die("Failed to allocate memory");
     for (int i = 0; i < s.line_amount; ++i) {
         if ((s.lines[i] = malloc(s.word_amount * (s.max_word_size + 1))) ==
@@ -274,7 +273,7 @@ void display_specs(void)
     float accuracy =
         (s.chars == 0) ? 0.0f : 100.0f * (float)s.chars_typed / s.chars;
     int raw_wpm = (int)(((float)s.chars / 5.0f) / ((float)t / 60.0f));
-    int net_wpm = raw_wpm - s.wrong_words;
+    int net_wpm = (int)(((float)s.chars_typed / 5.0f) / ((float)t / 60.0f));
 
     char raw_wpm_str[32], net_wpm_str[32], words_typed[32], time[32],
         accuracy_str[32];
@@ -368,8 +367,7 @@ void process_args(int argc, char **argv)
 
 void process_key(char c, enum char_ident *mistakes_buf)
 {
-    static int line = 0, ch = 0, mistake_count = 0;
-    ;
+    static int line = 0, ch = 0;
     char target = s.lines[line][ch];
 
     if (c == '\b' || c == 127) {
@@ -378,8 +376,11 @@ void process_key(char c, enum char_ident *mistakes_buf)
         --ch;
         --s.cursor_pos.x;
         --s.chars;
-        if (mistakes_buf[ch] == RIGHT_CHAR)
+        if (s.lines[line][ch] == ' ')
+            --s.compl_words;
+        if (mistakes_buf[ch] == RIGHT_CHAR) {
             --s.chars_typed;
+        }
         char buf[3];
         buf[0] = '\b';
         buf[1] = s.lines[line][ch];
@@ -389,9 +390,6 @@ void process_key(char c, enum char_ident *mistakes_buf)
         if (target != '\0')
             return;
         ++s.compl_words;
-        if (mistake_count > 0)
-            ++s.wrong_words;
-        mistake_count = 0;
         ch = 0;
         if (line == s.line_amount - 1) {
             line = 0;
@@ -416,13 +414,9 @@ void process_key(char c, enum char_ident *mistakes_buf)
             mistakes_buf[ch++] = RIGHT_CHAR;
             if (c == ' ') {
                 ++s.compl_words;
-                if (mistake_count > 0)
-                    ++s.wrong_words;
-                mistake_count = 0;
             }
         } else {
             mistakes_buf[ch++] = WRONG_CHAR;
-            ++mistake_count;
         }
         char buf[11];
         int l = snprintf(
@@ -438,9 +432,8 @@ void loop(void)
 {
     int c = read_char();
     s.time_start = time(NULL);
-    enum char_ident mistakes_buf[(s.max_word_size + 1) * s.word_amount];
     s.compl_words = 0;
-    s.wrong_words = 0;
+    enum char_ident mistakes_buf[(s.max_word_size + 1) * s.word_amount];
 
     while (1) {
         if (c == '\x11')
