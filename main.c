@@ -237,6 +237,14 @@ _Noreturn void reload_config(void)
     exit(0);
 }
 
+_Noreturn void remove_custom_config(void)
+{
+    char path[64];
+    make_path(path, sizeof path, CONFIG_SAVE_DIR, DICT_BIN_FILE);
+    int e = remove(path);
+    exit(0);
+}
+
 void program_exit(void)
 {
     if (s.lines != NULL) {
@@ -333,7 +341,8 @@ _Noreturn void display_help(void)
         "Keypace usage:\n"
         " -h show help message\n"
         " -v show version\n"
-        " -r reload word dictionary"
+        " -r reload word dictionary\n"
+        " -d load default word dictionary\n"
         " -t time mode\n"
         " -w word mode\n"
         " -i infinite mode\n\n"
@@ -353,7 +362,7 @@ _Noreturn void display_help(void)
         "Custom dictionary:\n"
         " To load custom dictionary place the txt file with your custom word \n"
         " set into ~/.config/keypace and name it words.txt, then run keypace "
-        "-r \n"
+        "-r\n"
         " so the program compiles it into binary and is able to read from it";
     puts(message);
     exit(0);
@@ -476,7 +485,7 @@ void update_info(void)
 
 void process_args(int argc, char **argv)
 {
-    switch (getopt(argc, argv, "hivrt:w:")) {
+    switch (getopt(argc, argv, "hivrdt:w:")) {
     case 'h':
         display_help();
         break;
@@ -496,6 +505,9 @@ void process_args(int argc, char **argv)
         break;
     case 'r':
         reload_config();
+        break;
+    case 'd':
+        remove_custom_config();
         break;
     case '?':
         die("Unknown option or missing argument, see -h for help");
