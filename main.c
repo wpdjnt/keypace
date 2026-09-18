@@ -241,7 +241,7 @@ _Noreturn void remove_custom_config(void)
 {
     char path[64];
     make_path(path, sizeof path, CONFIG_SAVE_DIR, DICT_BIN_FILE);
-    int e = remove(path);
+    remove(path);
     exit(0);
 }
 
