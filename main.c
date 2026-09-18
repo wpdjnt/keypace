@@ -1,5 +1,4 @@
 #define _POSIX_C_SOURCE 200809L
-#include "data.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -10,10 +9,17 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION "1.2.1"
+#define VERSION "1.3.0"
 
 #define WORDS_MAX 10
 #define LINES_MAX 10
+
+#define CONFIG_DIR "/.config/keypace/"
+#define CONFIG_SAVE_DIR "/.local/share/keypace/"
+#define CONFIG_DEFAULT_DIR "/usr/share/keypace/"
+
+#define DICT_FILE "words.txt"
+#define DICT_BIN_FILE "words.data"
 
 enum char_ident { RIGHT_CHAR, WRONG_CHAR };
 enum mode { TIME_MODE, WORD_MODE, INFINITE_MODE };
@@ -23,10 +29,22 @@ struct vec2 {
     int y;
 };
 
+struct word {
+    size_t size;
+    char *word;
+};
+
+struct word_array {
+    size_t size;
+    size_t capacity;
+    struct word *words;
+};
+
 struct state {
     struct termios orig;
     struct vec2 cursor_pos;
     struct vec2 *line_coords;
+    struct word_array words;
     enum mode mode;
     char **lines;
     int chars, chars_typed;
@@ -54,6 +72,34 @@ _Noreturn void die(const char *msg)
 {
     printf("Error: %s\n", msg);
     exit(errno);
+}
+
+// dinamic array
+
+void words_setup(void)
+{
+    s.words.capacity = 10;
+    if ((s.words.words = calloc(s.words.capacity, sizeof(struct word))) == NULL)
+        die("failed to allocate memory");
+}
+
+void words_add(struct word w)
+{
+    if (s.words.size < s.words.capacity) {
+        s.words.words[s.words.size++] = w;
+    } else {
+        s.words.capacity *= 1.5;
+        s.words.words =
+            realloc(s.words.words, s.words.capacity * sizeof(struct word));
+        s.words.words[s.words.size++] = w;
+    }
+}
+
+void words_cleanup(void)
+{
+    for (size_t i = 0; i < s.words.size; ++i)
+        free(s.words.words[i].word);
+    free(s.words.words);
 }
 
 // terminal settings
@@ -96,14 +142,99 @@ void enter_raw_mode(void)
         die("tcsetattr");
 }
 
+size_t make_path(char *buf, size_t n, const char *dir, const char *filename)
+{
+    char *home = getenv("HOME");
+    size_t sz = snprintf(buf, n, "%s%s%s", home, dir, filename);
+    return sz;
+}
+
 // setup & cleanup
 
-size_t get_max_word_size()
+void get_max_word_size(void)
 {
     size_t sz = 0;
-    for (int i = 0; i < WORDS_ARRAY_SIZE; ++i)
-        sz = max(sz, strlen(text_data[i]));
-    return sz;
+    for (size_t i = 0; i < s.words.size; ++i)
+        sz = max(sz, s.words.words[i].size);
+    s.max_word_size = sz;
+}
+
+void load_config(void)
+{
+    char path[64];
+    make_path(path, sizeof path, CONFIG_SAVE_DIR, DICT_BIN_FILE);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        f = fopen(CONFIG_DEFAULT_DIR DICT_BIN_FILE, "rb");
+        if (!f)
+            die("No binary config file found");
+    }
+
+    fread(&s.words.size, sizeof(s.words.size), 1, f);
+    s.words.capacity = s.words.size;
+
+    if ((s.words.words = calloc(s.words.size, sizeof(struct word))) == NULL)
+        die("Failed to allocate memory");
+
+    for (size_t i = 0; i < s.words.size; ++i) {
+        fread(&s.words.words[i].size, sizeof(s.words.words[i].size), 1, f);
+        if ((s.words.words[i].word =
+                 malloc(sizeof(char) * s.words.words[i].size)) == NULL)
+            die("Failed to allocate memory");
+    }
+
+    for (size_t i = 0; i < s.words.size; ++i) {
+        fread(s.words.words[i].word, sizeof(char), s.words.words[i].size, f);
+    }
+
+    get_max_word_size();
+
+    fclose(f);
+}
+
+_Noreturn void reload_config(void)
+{
+    char path[64];
+    make_path(path, sizeof path, CONFIG_DIR, DICT_FILE);
+    FILE *conf = fopen(path, "r");
+    if (!conf) {
+        die("no config file found");
+    }
+
+    make_path(path, sizeof path, CONFIG_SAVE_DIR, DICT_BIN_FILE);
+    FILE *saved_bin = fopen(path, "wb");
+    if (!saved_bin) {
+        die("Couldn't open the binary file for writing");
+    }
+
+    words_setup();
+
+    _Bool end = 1;
+    while (end) {
+        struct word w;
+        w.word = NULL;
+        if (getline(&w.word, &w.size, conf) != -1) {
+            w.size = strlen(w.word);
+            w.word[w.size - 1] = '\0';
+            words_add(w);
+        } else {
+            break;
+        }
+    }
+
+    fwrite(&s.words.size, sizeof s.words.size, 1, saved_bin);
+    for (size_t i = 0; i < s.words.size; ++i)
+        fwrite(&s.words.words[i].size, sizeof s.words.words[i].size, 1,
+               saved_bin);
+
+    for (size_t i = 0; i < s.words.size; ++i)
+        fwrite(s.words.words[i].word, sizeof(char), s.words.words[i].size,
+               saved_bin);
+
+    words_cleanup();
+    fclose(conf);
+    fclose(saved_bin);
+    exit(0);
 }
 
 void program_exit(void)
@@ -118,6 +249,7 @@ void program_exit(void)
     s.lines = NULL;
     s.line_coords = NULL;
 
+    words_cleanup();
     exit_raw_mode();
     program_write("\033[?1049l", 8);
 }
@@ -127,10 +259,10 @@ void program_init(void)
     atexit(program_exit);
     enter_raw_mode();
     get_window_size(&s.cols, &s.rows);
+    load_config();
     srand(time(NULL));
     s.time_start = 0;
 
-    s.max_word_size = get_max_word_size();
     if ((s.line_amount = min(LINES_MAX, s.rows - 2)) < 3)
         die("Size of a terminal is too small");
     if ((s.word_amount = min(WORDS_MAX, s.cols / s.max_word_size)) == 0)
@@ -201,6 +333,7 @@ _Noreturn void display_help(void)
         "Keypace usage:\n"
         " -h show help message\n"
         " -v show version\n"
+        " -r reload word dictionary"
         " -t time mode\n"
         " -w word mode\n"
         " -i infinite mode\n\n"
@@ -216,7 +349,12 @@ _Noreturn void display_help(void)
         "  if specified value is less than 10 words, then it will be "
         "defaulted to 10\n"
         " infinite mode:\n"
-        "  runs indefinitely, press Ctrl+q to terminate";
+        "  runs indefinitely, press Ctrl+q to terminate\n"
+        "Custom dictionary:\n"
+        " To load custom dictionary place the txt file with your custom word \n"
+        " set into ~/.config/keypace and name it words.txt, then run keypace "
+        "-r \n"
+        " so the program compiles it into binary and is able to read from it";
     puts(message);
     exit(0);
 }
@@ -239,7 +377,7 @@ void gen_text(void)
         i = 0;
         for (int b = 0; b < s.word_amount; ++b) {
             i += sprintf(s.lines[a] + i, "%s",
-                         text_data[rand() % WORDS_ARRAY_SIZE]);
+                         s.words.words[rand() % s.words.size].word);
             s.lines[a][i++] = (b < s.word_amount - 1) ? ' ' : '\0';
         }
         x = (s.cols - i) / 2 + 1;
@@ -338,7 +476,7 @@ void update_info(void)
 
 void process_args(int argc, char **argv)
 {
-    switch (getopt(argc, argv, "hivt:w:")) {
+    switch (getopt(argc, argv, "hivrt:w:")) {
     case 'h':
         display_help();
         break;
@@ -355,6 +493,9 @@ void process_args(int argc, char **argv)
         break;
     case 'v':
         display_version();
+        break;
+    case 'r':
+        reload_config();
         break;
     case '?':
         die("Unknown option or missing argument, see -h for help");
